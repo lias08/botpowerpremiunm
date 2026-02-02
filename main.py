@@ -8,8 +8,9 @@ import random
 import os
 
 # ===================== CONFIG =====================
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")  # Der Token wird über Umgebungsvariablen gesetzt (sicherer)
-SCAN_MIN = 12     # nicht unter 12s zuhause
+DISCORD_TOKEN = "DEIN_DISCORD_BOT_TOKEN"  # Hier den Token aus deinen Umgebungsvariablen oder Secret holen
+
+SCAN_MIN = 12     # nicht unter 12s
 SCAN_MAX = 18
 # ==================================================
 
@@ -54,8 +55,8 @@ class VintedSniper:
     def warmup(self):
         try:
             self.session.get("https://www.vinted.de", headers=self.headers)
-        except Exception as e:
-            print(f"⚠️ Fehler beim Warmup: {e}")
+        except:
+            pass
 
     async def send_to_discord(self, item, bot):
         price = float(item["total_item_price"]["amount"])
@@ -115,41 +116,16 @@ class VintedSniper:
 
 # ==========================================
 intents = discord.Intents.default()
-intents.message_content = True  # Der Bot muss auf den Nachrichteninhalt zugreifen können
+intents.message_content = True  # Muss True sein, um Nachrichteninhalte zu lesen
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-@bot.event
-async def on_ready():
-    print(f"🤖 Eingeloggt als {bot.user}")
-    for cid, data in channels_data.items():
-        if cid in active_snipers:
-            continue
-        url = data.get("url")
-        if not url:
-            continue
-
-        print(f"▶️ Starte gespeicherten Scan für Channel {cid}")
-        sniper = VintedSniper(url, cid)
-        active_snipers[cid] = sniper
-        bot.loop.create_task(sniper.run(bot))
-
-@bot.event
-async def on_message(message):
-    # Verhindere, dass der Bot auf eigene Nachrichten reagiert
-    if message.author == bot.user:
-        return
-
-    # Logge die empfangenen Nachrichten
-    print(f"📩 Neue Nachricht empfangen: {message.content}")
-
-    await bot.process_commands(message)  # Stelle sicher, dass alle Befehle korrekt verarbeitet werden
-
+# Kommandos & Events
 @bot.command(name="startscan")
 async def startscan(ctx, url: str):
-    cid = str(ctx.channel.id)
+    # Debug: Zeigt den Befehl an
+    print(f"🔍 Startscan für Channel {ctx.channel.id} mit URL: {url}")
 
-    # Debugging-Ausgabe
-    print(f"🔍 Empfange startscan-Befehl mit URL: {url}")
+    cid = str(ctx.channel.id)
 
     if cid in active_snipers:
         await ctx.send("⚠️ Scan läuft hier bereits.")
@@ -163,6 +139,40 @@ async def startscan(ctx, url: str):
     active_snipers[cid] = sniper
     bot.loop.create_task(sniper.run(bot))
 
-    await ctx.send("✅ Scan gestartet & gespeichert")
+    await ctx.send("✅ Scan gestartet & gespeichert.")
+
+@bot.event
+async def on_ready():
+    print(f"🤖 Eingeloggt als {bot.user}")
+    for cid, data in channels_data.items():
+        if cid in active_snipers:
+            continue
+        url = data.get("url")
+        if not url:
+            continue
+        print(f"▶️ Starte gespeicherten Scan für Channel {cid}")
+        sniper = VintedSniper(url, cid)
+        active_snipers[cid] = sniper
+        bot.loop.create_task(sniper.run(bot))
+
+@bot.event
+async def on_message(message):
+    if message.author == bot.user:
+        return
+
+    # Debug: Zeigt empfangene Nachricht an
+    print(f"📩 Neue Nachricht empfangen: {message.content}")
+
+    # Wenn der Befehl !startscan empfangen wird
+    if message.content.startswith("!startscan"):
+        print("✔️ Befehl erkannt: !startscan")
+        args = message.content.split(" ", 1)
+        if len(args) == 2:
+            url = args[1]
+            await startscan(message.channel, url)
+        else:
+            await message.channel.send("⚠️ Bitte gib eine gültige URL an.")
+
+    await bot.process_commands(message)
 
 bot.run(DISCORD_TOKEN)
