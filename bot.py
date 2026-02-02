@@ -9,10 +9,11 @@ import asyncio
 import json
 import os
 import aiohttp
+from urllib.parse import urlparse, parse_qs, urlencode
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNELS_FILE = "channel_urls.json"
-SCAN_DELAY = 1.5
+SCAN_DELAY = 1.0
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -28,12 +29,19 @@ class VintedScanner:
         self.seen = set()
 
     def convert_url(self, url: str) -> str:
-        if "api/v2/catalog/items" in url:
-            return url
-        params = url.split("?", 1)[1]
-        if "order=" not in params:
-            params += "&order=newest_first"
-        return f"https://www.vinted.de/api/v2/catalog/items?{params}"
+        parsed = urlparse(url)
+        params = parse_qs(parsed.query)
+
+        params["page"] = ["1"]
+        params["per_page"] = ["20"]
+        params["order"] = ["newest_first"]
+
+        flat = {}
+        for k, v in params.items():
+            for val in v:
+                flat.setdefault(k, []).append(val)
+
+        return "https://www.vinted.de/api/v2/catalog/items?" + urlencode(flat, doseq=True)
 
     async def run(self):
         channel = bot.get_channel(self.channel_id)
@@ -43,18 +51,31 @@ class VintedScanner:
 
         print(f"🚀 Starte Scan: {self.channel_id}")
 
-        async with aiohttp.ClientSession(
-            headers={"User-Agent": "Mozilla/5.0"}
-        ) as session:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "Accept": "application/json",
+            "Accept-Language": "de-DE,de;q=0.9",
+            "Referer": "https://www.vinted.de/",
+        }
+
+        async with aiohttp.ClientSession(headers=headers) as session:
             while True:
                 try:
                     async with session.get(self.api_url) as r:
                         if r.status != 200:
+                            print(f"⚠️ {self.channel_id} Status {r.status}")
                             await asyncio.sleep(5)
                             continue
 
                         data = await r.json()
-                        for item in data.get("items", []):
+                        items = data.get("items", [])
+
+                        if not items:
+                            print(f"⚠️ {self.channel_id} → 0 Items")
+                            await asyncio.sleep(SCAN_DELAY)
+                            continue
+
+                        for item in items:
                             item_id = item["id"]
                             if item_id in self.seen:
                                 continue
@@ -86,8 +107,7 @@ async def on_ready():
         data = json.load(f)
 
     for channel_id, cfg in data.items():
-        urls = cfg.get("urls", [])
-        for url in urls:
+        for url in cfg.get("urls", []):
             key = f"{channel_id}_{hash(url)}"
             if key in active_tasks:
                 continue
