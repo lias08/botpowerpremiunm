@@ -2,7 +2,6 @@ import discord
 from discord.ext import commands
 import os
 import json
-import requests
 import random
 import asyncio
 from dotenv import load_dotenv
@@ -101,11 +100,12 @@ class VintedSniper:
 
 # ============================================
 intents = discord.Intents.default()
-intents.message_content = True
+intents.message_content = True  # Damit der Bot Nachrichteninhalte lesen kann
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 @bot.command(name="startscan")
 async def startscan(ctx, url: str):
+    print(f"Empfange Befehl: !startscan mit URL: {url}")
     cid = str(ctx.channel.id)
 
     if cid in active_snipers:
@@ -137,5 +137,10 @@ async def on_ready():
         sniper = VintedSniper(url, cid)
         active_snipers[cid] = sniper
         bot.loop.create_task(sniper.run(bot))
+
+@bot.event
+async def on_message(message):
+    print(f"Nachricht empfangen: {message.content}")  # Dies hilft uns zu sehen, ob der Bot Nachrichten empfängt
+    await bot.process_commands(message)
 
 bot.run(DISCORD_TOKEN)
