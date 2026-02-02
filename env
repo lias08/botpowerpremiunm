@@ -1,4 +1,1 @@
-from dotenv import load_dotenv
-load_dotenv()
 
-DISCORD_TOKEN=MTQ2MjEyODY2ODM0MzE0NDYxMw.G26zF0.4BKNCKttvoOWU-tvgD_XQCojqYtITLZp0yfVjY
