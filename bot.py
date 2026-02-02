@@ -1,114 +1,97 @@
-# ================= AUDIOOP FIX =================
-import sys, types
-sys.modules["audioop"] = types.ModuleType("audioop")
-# ===============================================
-
 import discord
-from discord.ext import commands
+import requests
 import asyncio
 import json
 import os
-import tls_client
-from urllib.parse import urlparse, parse_qs, urlencode
+from datetime import datetime
 
-TOKEN = os.getenv("DISCORD_TOKEN")
-CHANNELS_FILE = "channel_urls.json"
-SCAN_DELAY = 2
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Accept": "application/json"
+}
+
+CHECK_INTERVAL = 15  # Sekunden (schneller = mehr Risiko)
+TIMEOUT = 10
 
 intents = discord.Intents.default()
-bot = commands.Bot(command_prefix="!", intents=intents)
+client = discord.Client(intents=intents)
 
-active_tasks = {}
+seen_items = set()
 
-# ---------- VINTED ----------
-class VintedScanner:
-    def __init__(self, channel_id: int, url: str):
-        self.channel_id = channel_id
-        self.api_url = self.convert(url)
-        self.seen = set()
-        self.session = tls_client.Session(
-            client_identifier="chrome_120",
-            random_tls_extension_order=True
-        )
 
-    def convert(self, url):
-        parsed = urlparse(url)
-        params = parse_qs(parsed.query)
+def load_channels():
+    with open("channels.json", "r", encoding="utf-8") as f:
+        return json.load(f)["channels"]
 
-        params["page"] = ["1"]
-        params["per_page"] = ["20"]
-        params["order"] = ["newest_first"]
 
-        return "https://www.vinted.de/api/v2/catalog/items?" + urlencode(params, doseq=True)
+async def fetch_items(vinted_channel_id):
+    url = f"https://www.vinted.de/api/v2/catalog/items?catalog_ids={vinted_channel_id}&order=newest_first&per_page=5"
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+        if r.status_code != 200:
+            print(f"⚠️ {vinted_channel_id} Status {r.status_code}")
+            return []
 
-    async def run(self):
-        channel = bot.get_channel(self.channel_id)
-        if not channel:
-            print(f"❌ Channel {self.channel_id} nicht gefunden")
-            return
+        return r.json().get("items", [])
+    except Exception as e:
+        print(f"❌ Fehler bei {vinted_channel_id}: {e}")
+        return []
 
-        print(f"🚀 Starte Scan: {self.channel_id}")
 
-        while True:
-            try:
-                r = self.session.get(
-                    self.api_url,
-                    headers={
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-                        "Accept": "application/json",
-                        "Accept-Language": "de-DE,de;q=0.9",
-                        "Referer": "https://www.vinted.de/",
-                    }
-                )
+async def scanner_loop():
+    await client.wait_until_ready()
+    channels = load_channels()
 
-                if r.status_code != 200:
-                    print(f"⚠️ {self.channel_id} Status {r.status_code}")
-                    await asyncio.sleep(5)
-                    continue
+    print(f"🔥 {len(channels)} Scanner laufen")
 
-                data = r.json()
-                items = data.get("items", [])
+    while True:
+        for cfg in channels:
+            vinted_id = cfg["vinted_channel_id"]
+            discord_id = int(cfg["discord_channel_id"])
+            discord_channel = client.get_channel(discord_id)
 
-                if not items:
-                    await asyncio.sleep(SCAN_DELAY)
-                    continue
-
-                for item in items:
-                    item_id = item["id"]
-                    if item_id in self.seen:
-                        continue
-
-                    self.seen.add(item_id)
-
-                    await channel.send(
-                        f"🔥 **{item['title']}**\n"
-                        f"💶 {item['price']['amount']}€\n"
-                        f"https://www.vinted.de/items/{item_id}"
-                    )
-
-                await asyncio.sleep(SCAN_DELAY)
-
-            except Exception as e:
-                print(f"❌ Fehler {self.channel_id}: {e}")
-                await asyncio.sleep(5)
-
-# ---------- DISCORD ----------
-@bot.event
-async def on_ready():
-    print(f"🤖 Bot online als {bot.user}")
-
-    with open(CHANNELS_FILE, "r", encoding="utf-8") as f:
-        data = json.load(f)
-
-    for channel_id, cfg in data.items():
-        for url in cfg["urls"]:
-            key = f"{channel_id}_{hash(url)}"
-            if key in active_tasks:
+            if not discord_channel:
                 continue
 
-            scanner = VintedScanner(int(channel_id), url)
-            active_tasks[key] = asyncio.create_task(scanner.run())
+            items = await fetch_items(vinted_id)
 
-    print(f"🔥 {len(active_tasks)} Scanner laufen")
+            for item in items:
+                item_id = item["id"]
+                if item_id in seen_items:
+                    continue
 
-bot.run(TOKEN)
+                seen_items.add(item_id)
+
+                title = item.get("title", "Kein Titel")
+                price = item.get("price", "0")
+                url = item.get("url", "")
+                img = item.get("photo", {}).get("url", "")
+
+                embed = discord.Embed(
+                    title=title,
+                    url=url,
+                    description=f"💰 Preis: **{price}€**",
+                    color=0x2ecc71,
+                    timestamp=datetime.utcnow()
+                )
+
+                if img:
+                    embed.set_thumbnail(url=img)
+
+                await discord_channel.send(embed=embed)
+                print(f"✅ Neuer Artikel gepostet: {item_id}")
+
+            await asyncio.sleep(2)  # kleiner Abstand zwischen Channels
+
+        await asyncio.sleep(CHECK_INTERVAL)
+
+
+@client.event
+async def on_ready():
+    print(f"🤖 Bot online als {client.user}")
+    client.loop.create_task(scanner_loop())
+
+
+client.run(DISCORD_TOKEN)
