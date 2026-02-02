@@ -8,18 +8,20 @@ import random
 import os
 
 # ===================== CONFIG =====================
-DISCORD_TOKEN = "MTQ2MjEyODY2ODM0MzE0NDYxMw.G26zF0.4BKNCKttvoOWU-tvgD_XQCojqYtITLZp0yfVjY"
-
-SCAN_MIN = 12     # nicht unter 12s zuhause
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")  # 🔒 SECRET TOKEN
+SCAN_MIN = 12
 SCAN_MAX = 18
 # ==================================================
+
+if not DISCORD_TOKEN:
+    raise RuntimeError("❌ DISCORD_TOKEN nicht gesetzt!")
 
 CHANNELS_FILE = "channel_urls.json"
 active_snipers = {}
 
 # Lade gespeicherte URLs
 if os.path.exists(CHANNELS_FILE):
-    with open(CHANNELS_FILE, "r") as f:
+    with open(CHANNELS_FILE, "r", encoding="utf-8") as f:
         channels_data = json.load(f)
 else:
     channels_data = {}
@@ -31,13 +33,14 @@ class VintedSniper:
         self.api_url = self.convert_url(url)
 
         self.session = tls_client.Session(
-            client_identifier="chrome_112"
+            client_identifier="chrome_112",
+            random_tls_extension_order=True
         )
 
         self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
             "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
+            "Accept-Language": "de-DE,de;q=0.9",
             "Referer": "https://www.vinted.de/"
         }
 
@@ -69,23 +72,21 @@ class VintedSniper:
         embed = discord.Embed(
             title=f"🔥 {item['title']}",
             url=url,
-            color=0x09b1ba,
-            timestamp=discord.utils.utcnow()
+            color=0x09b1ba
         )
 
         embed.add_field(name="💶 Preis", value=f"{price:.2f} €", inline=True)
         embed.add_field(name="🚚 Gesamt ca.", value=f"{total:.2f} €", inline=True)
         embed.add_field(name="📏 Größe", value=item.get("size_title", "N/A"), inline=True)
         embed.add_field(
-            name="⚡ Aktionen",
+            name="⚡ Aktion",
             value=f"[🛒 Kaufen](https://www.vinted.de/transaction/buy/new?item_id={item_id})",
             inline=False
         )
 
         photos = item.get("photos", [])
         if photos:
-            img = photos[0]["url"].replace("/medium/", "/full/")
-            embed.set_image(url=img)
+            embed.set_image(url=photos[0]["url"].replace("/medium/", "/full/"))
 
         channel = bot.get_channel(self.channel_id)
         if channel:
@@ -100,60 +101,4 @@ class VintedSniper:
                 r = self.session.get(self.api_url, headers=self.headers)
 
                 if r.status_code == 200:
-                    for item in r.json().get("items", []):
-                        if item["id"] not in self.seen_items:
-                            if self.seen_items:
-                                await self.send_to_discord(item, bot)
-                                print("✅ NEU:", item["title"])
-                            self.seen_items.add(item["id"])
-
-                elif r.status_code == 403:
-                    print("⚠️ 403 – Pause")
-                    await asyncio.sleep(180)
-
-                await asyncio.sleep(random.uniform(SCAN_MIN, SCAN_MAX))
-
-            except Exception as e:
-                print("❌ Fehler:", e)
-                await asyncio.sleep(15)
-
-# ==========================================
-intents = discord.Intents.default()
-intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
-
-@bot.command(name="startscan")
-async def startscan(ctx, url: str):
-    cid = str(ctx.channel.id)
-
-    if cid in active_snipers:
-        await ctx.send("⚠️ Scan läuft hier bereits")
-        return
-
-    channels_data[cid] = {"url": url}
-    with open(CHANNELS_FILE, "w") as f:
-        json.dump(channels_data, f, indent=4)
-
-    sniper = VintedSniper(url, cid)
-    active_snipers[cid] = sniper
-    bot.loop.create_task(sniper.run(bot))
-
-    await ctx.send("✅ Scan gestartet & gespeichert")
-
-@bot.event
-async def on_ready():
-    print(f"🤖 Eingeloggt als {bot.user}")
-
-    for cid, data in channels_data.items():
-        if cid in active_snipers:
-            continue
-        url = data.get("url")
-        if not url:
-            continue
-
-        print(f"▶️ Starte gespeicherten Scan für Channel {cid}")
-        sniper = VintedSniper(url, cid)
-        active_snipers[cid] = sniper
-        bot.loop.create_task(sniper.run(bot))
-
-bot.run(DISCORD_TOKEN)
+                    for item in r.j
