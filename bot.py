@@ -3,35 +3,53 @@ import aiohttp
 import asyncio
 import json
 import os
-from datetime import datetime
+from bs4 import BeautifulSoup
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-SCAN_INTERVAL = 1.5  # Sekunden (unter 1s → 429 Risiko)
+SCAN_INTERVAL = 2.0
 
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 
-posted_cache: dict[str, set[str]] = {}
-
 with open("channels.json", "r", encoding="utf-8") as f:
     CHANNELS = json.load(f)
 
+seen_items = {}
 
-async def fetch_articles(session: aiohttp.ClientSession, url: str):
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+}
+
+
+async def fetch_items(session, url):
     try:
-        async with session.get(url, timeout=10) as r:
+        async with session.get(url, headers=HEADERS, timeout=15) as r:
             if r.status != 200:
-                print(f"⚠️ API Status {r.status} | {url}")
+                print(f"⚠️ Status {r.status}")
                 return []
 
-            return await r.json()
+            html = await r.text()
+
+        soup = BeautifulSoup(html, "html.parser")
+        items = []
+
+        for a in soup.select("a[href*='/items/']"):
+            href = a.get("href")
+            item_id = href.split("/")[-1].split("-")[0]
+
+            title = a.get_text(strip=True)
+            link = "https://www.vinted.de" + href
+
+            items.append((item_id, title, link))
+
+        return items
 
     except Exception as e:
-        print(f"❌ Fetch Error {url}: {e}")
+        print(f"❌ Fetch Error: {e}")
         return []
 
 
-async def scanner(channel_id: str, api_url: str):
+async def scanner(channel_id, config):
     await client.wait_until_ready()
     channel = client.get_channel(int(channel_id))
 
@@ -39,26 +57,22 @@ async def scanner(channel_id: str, api_url: str):
         print(f"❌ Channel {channel_id} nicht gefunden")
         return
 
-    posted_cache[channel_id] = set()
+    url = config["url"]
+    seen_items[channel_id] = set()
+
     print(f"🚀 Starte Scan: {channel_id}")
 
     async with aiohttp.ClientSession() as session:
         while not client.is_closed():
-            articles = await fetch_articles(session, api_url)
+            items = await fetch_items(session, url)
 
-            for item in articles:
-                article_id = str(item.get("id"))
-                title = item.get("title", "Neuer Artikel")
-                url = item.get("url", "")
-
-                if not article_id or article_id in posted_cache[channel_id]:
+            for item_id, title, link in items:
+                if item_id in seen_items[channel_id]:
                     continue
 
-                posted_cache[channel_id].add(article_id)
-
-                msg = f"🆕 **{title}**\n{url}"
-                await channel.send(msg)
-                print(f"✅ Gesendet → {channel_id}: {title}")
+                seen_items[channel_id].add(item_id)
+                await channel.send(f"🆕 **{title}**\n{link}")
+                print(f"✅ Gesendet: {item_id}")
 
             await asyncio.sleep(SCAN_INTERVAL)
 
@@ -66,11 +80,10 @@ async def scanner(channel_id: str, api_url: str):
 @client.event
 async def on_ready():
     print(f"🤖 Bot online als {client.user}")
-
-    for ch_id, api in CHANNELS.items():
-        asyncio.create_task(scanner(ch_id, api))
-
     print(f"🔥 {len(CHANNELS)} Scanner laufen")
+
+    for cid, cfg in CHANNELS.items():
+        asyncio.create_task(scanner(cid, cfg))
 
 
 client.run(TOKEN)
