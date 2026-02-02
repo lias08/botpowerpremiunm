@@ -2,32 +2,31 @@ import discord
 from discord.ext import commands
 import tls_client
 import asyncio
-import random
 import json
 import os
 
 # ===================== CONFIG =====================
-SCAN_MIN = 12
-SCAN_MAX = 18
-
+SCAN_DELAY = 1  # 🔥 1 Sekunde pro Channel
 DATA_DIR = "/data"
 CHANNELS_FILE = f"{DATA_DIR}/channel_urls.json"
-active_snipers = {}
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# ===================== LOAD CHANNELS =====================
+active_snipers = {}
+
+# ===================== LOAD JSON =====================
 if os.path.exists(CHANNELS_FILE):
     with open(CHANNELS_FILE, "r") as f:
         channels_data = json.load(f)
 else:
     channels_data = {}
 
-# ===================== SNIPER =====================
-class VintedSniper:
-    def __init__(self, url, channel_id):
+# ===================== POOL SNIPER =====================
+class ChannelPoolSniper:
+    def __init__(self, channel_id, urls):
         self.channel_id = int(channel_id)
-        self.api_url = self.convert_url(url)
+        self.urls = [self.convert_url(u) for u in urls]
+        self.index = 0
         self.seen_items = set()
 
         self.session = tls_client.Session(
@@ -35,7 +34,7 @@ class VintedSniper:
         )
 
         self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
             "Accept": "application/json, text/plain, */*",
             "Accept-Language": "de-DE,de;q=0.9",
             "Referer": "https://www.vinted.de/"
@@ -48,23 +47,13 @@ class VintedSniper:
         base = "https://www.vinted.de/api/v2/catalog/items?"
         params = url.split("?")[-1]
 
-        if params == url:
-            return base + "order=newest_first&per_page=20"
-
         if "order=" not in params:
             params += "&order=newest_first"
 
         return base + params
 
-    def warmup(self):
-        try:
-            self.session.get("https://www.vinted.de", headers=self.headers)
-        except:
-            pass
-
     async def send_to_discord(self, item, bot):
         price = float(item["total_item_price"]["amount"])
-        total = round(price + 0.70 + (price * 0.05) + 3.99, 2)
         item_id = item["id"]
 
         embed = discord.Embed(
@@ -74,9 +63,8 @@ class VintedSniper:
             timestamp=discord.utils.utcnow()
         )
 
-        embed.add_field(name="💶 Preis", value=f"{price:.2f} €")
-        embed.add_field(name="🚚 Gesamt ca.", value=f"{total:.2f} €")
-        embed.add_field(name="📏 Größe", value=item.get("size_title", "N/A"))
+        embed.add_field(name="💶 Preis", value=f"{price:.2f} €", inline=True)
+        embed.add_field(name="📏 Größe", value=item.get("size_title", "N/A"), inline=True)
 
         photos = item.get("photos", [])
         if photos:
@@ -87,12 +75,15 @@ class VintedSniper:
             await channel.send(embed=embed)
 
     async def run(self, bot):
-        self.warmup()
-        print(f"🎯 Scan gestartet für Channel {self.channel_id}")
+        print(f"🎯 Pool-Scan gestartet | Channel {self.channel_id} | URLs: {len(self.urls)}")
 
         while True:
             try:
-                r = self.session.get(self.api_url, headers=self.headers)
+                url = self.urls[self.index]
+                self.index = (self.index + 1) % len(self.urls)
+
+                r = self.session.get(url, headers=self.headers)
+
                 if r.status_code == 200:
                     for item in r.json().get("items", []):
                         if item["id"] not in self.seen_items:
@@ -101,14 +92,14 @@ class VintedSniper:
                             self.seen_items.add(item["id"])
 
                 elif r.status_code == 403:
-                    print("⚠️ 403 – Pause 3 Minuten")
-                    await asyncio.sleep(180)
+                    print(f"⚠️ 403 | Channel {self.channel_id}")
+                    await asyncio.sleep(5)
 
-                await asyncio.sleep(random.uniform(SCAN_MIN, SCAN_MAX))
+                await asyncio.sleep(SCAN_DELAY)
 
             except Exception as e:
-                print("❌ Fehler:", e)
-                await asyncio.sleep(15)
+                print(f"❌ Fehler Channel {self.channel_id}:", e)
+                await asyncio.sleep(3)
 
 # ===================== DISCORD BOT =====================
 intents = discord.Intents.default()
@@ -124,29 +115,36 @@ async def startscan(ctx, url: str):
         await ctx.send("⚠️ Scan läuft hier bereits")
         return
 
-    channels_data[cid] = {"url": url}
+    channels_data[cid] = {"urls": [url]}
     with open(CHANNELS_FILE, "w") as f:
-        json.dump(channels_data, f)
+        json.dump(channels_data, f, indent=4)
 
-    sniper = VintedSniper(url, cid)
+    sniper = ChannelPoolSniper(cid, [url])
     active_snipers[cid] = sniper
     bot.loop.create_task(sniper.run(bot))
 
-    await ctx.send("✅ Scan gestartet")
+    await ctx.send("✅ Pool-Scan gestartet")
 
 @bot.event
 async def on_ready():
     print(f"🤖 Eingeloggt als {bot.user}")
+    print("📦 Geladene Channels:", channels_data)
 
     for cid, data in channels_data.items():
-        if cid not in active_snipers:
-            sniper = VintedSniper(data["url"], cid)
-            active_snipers[cid] = sniper
-            bot.loop.create_task(sniper.run(bot))
+        if cid in active_snipers:
+            continue
+
+        urls = data.get("urls", [])
+        if not urls:
+            continue
+
+        sniper = ChannelPoolSniper(cid, urls)
+        active_snipers[cid] = sniper
+        bot.loop.create_task(sniper.run(bot))
 
 # ===================== START =====================
 TOKEN = os.getenv("DISCORD_TOKEN")
 if not TOKEN:
-    raise RuntimeError("DISCORD_TOKEN fehlt!")
+    raise RuntimeError("DISCORD_TOKEN fehlt")
 
 bot.run(TOKEN)
