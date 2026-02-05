@@ -1,176 +1,188 @@
+import discord
+from discord.ext import commands
 import tls_client
 import time
-import os
-import discord
-from discord.ext import tasks, commands
-from flask import Flask
-from threading import Thread
+import json
 import asyncio
+import random
+import os
+from dotenv import load_dotenv
+
+# Lade Umgebungsvariablen aus der .env Datei (lokal) 
+load_dotenv()
+
+# ===================== CONFIG =====================
+# Railway nutzt Umgebungsvariablen. Falls keine gesetzt ist, wird der Fallback genutzt.
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+
+SCAN_MIN = 12     # Mindestpause zwischen Scans (Sekunden)
+SCAN_MAX = 18     # Maximalpause
+
+# Pfad für Railway Volumes (Persistent Storage)
+# Wenn du kein Volume nutzt, ändere dies zurück zu "channel_urls.json"
+STORAGE_DIR = "/app/data"
+CHANNELS_FILE = os.path.join(STORAGE_DIR, "channel_urls.json") if os.path.exists(STORAGE_DIR) else "channel_urls.json"
+
+active_snipers = {}
+
+# Verzeichnis erstellen, falls es im Volume noch nicht existiert
+if STORAGE_DIR != "/app/data" and not os.path.exists(STORAGE_DIR):
+    try:
+        os.makedirs(STORAGE_DIR)
+    except:
+        pass
+
+# Lade gespeicherte URLs
+if os.path.exists(CHANNELS_FILE):
+    with open(CHANNELS_FILE, "r") as f:
+        channels_data = json.load(f)
+else:
+    channels_data = {}
 
 # ==========================================
-# KONFIGURATION (Laden aus Umgebungsvariablen)
-# ==========================================
-DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
-CHANNEL_ID = int(os.environ.get("CHANNEL_ID", 0)) # Muss ein Integer sein
-BROWSER_URL = os.environ.get("BROWSER_URL")
-# ==========================================
+class VintedSniper:
+    def __init__(self, url, channel_id):
+        self.channel_id = int(channel_id)
+        self.api_url = self.convert_url(url)
 
-# 1. Flask Webserver (Damit Render den Bot nicht killt)
-app = Flask(__name__)
+        self.session = tls_client.Session(
+            client_identifier="chrome_112"
+        )
 
-@app.route('/')
-def home():
-    return "Discord Bot läuft! 🤖"
-
-def run_web_server():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
-
-# 2. Discord Bot Setup
-intents = discord.Intents.default()
-bot = commands.Bot(command_prefix="!", intents=intents)
-
-# 3. Vinted Logik
-def convert_url(url):
-    if "api/v2/catalog/items" in url: return url
-    base_api = "https://www.vinted.de/api/v2/catalog/items?"
-    params = url.split('?')[-1]
-    if params == url: return base_api + "per_page=20&order=newest_first"
-    if "order=" not in params: params += "&order=newest_first"
-    return base_api + params
-
-class VintedScanner:
-    def __init__(self):
-        self.session = tls_client.Session(client_identifier="chrome_112")
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36",
             "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
+            "Referer": "https://www.vinted.de/"
         }
-        self.seen_items = []
-        # Erster Verbindungsaufbau für Cookies
-        try: self.session.get("https://www.vinted.de", headers=self.headers)
-        except: pass
 
-    def get_clean_status(self, item):
-        raw_status = item.get('status_id') or item.get('status') or "Unbekannt"
-        mapping = {
-            "6": "Neu mit Etikett ✨", "new_with_tags": "Neu mit Etikett ✨",
-            "1": "Neu ohne Etikett ✨", "new_without_tags": "Neu ohne Etikett ✨",
-            "2": "Sehr gut 👌", "very_good": "Sehr gut 👌",
-            "3": "Gut 👍", "good": "Gut 👍",
-            "4": "Zufriedenstellend 🆗", "satisfactory": "Zufriedenstellend 🆗"
-        }
-        return mapping.get(str(raw_status).lower(), str(raw_status))
+        self.seen_items = set()
 
-    def fetch_new_items(self):
-        # Scannt Vinted und gibt eine Liste neuer Items zurück
-        api_url = convert_url(BROWSER_URL)
-        new_found = []
+    def convert_url(self, url):
+        if "api/v2/catalog/items" in url:
+            return url
+        base = "https://www.vinted.de/api/v2/catalog/items?"
+        params = url.split("?")[-1]
+        if params == url:
+            return base + "order=newest_first&per_page=20"
+        if "order=" not in params:
+            params += "&order=newest_first"
+        return base + params
+
+    def warmup(self):
         try:
-            response = self.session.get(api_url, headers=self.headers)
-            if response.status_code == 200:
-                items = response.json().get("items", [])
-                for item in items:
-                    if item["id"] not in self.seen_items:
-                        # Nur hinzufügen, wenn wir schon items kennen (damit beim Start nicht 20 spammen)
-                        if len(self.seen_items) > 0:
-                            new_found.append(item)
-                        self.seen_items.append(item["id"])
-                
-                # Speicher begrenzen
-                if len(self.seen_items) > 500: 
-                    self.seen_items = self.seen_items[-200:]
-            elif response.status_code == 403:
-                print("⚠️ 403 Forbidden - IP Blocked temporary")
-                return "BLOCK"
+            self.session.get("https://www.vinted.de", headers=self.headers)
+        except:
+            pass
+
+    async def send_to_discord(self, item, bot):
+        try:
+            price = float(item["total_item_price"]["amount"])
+            # Käuferschutz & Versand Schätzung
+            total = round(price + 0.70 + (price * 0.05) + 3.99, 2)
+            item_id = item["id"]
+            url = f"https://www.vinted.de/items/{item_id}"
+
+            embed = discord.Embed(
+                title=f"🔥 {item.get('title', 'Unbekannter Artikel')}",
+                url=url,
+                color=0x09b1ba,
+                timestamp=discord.utils.utcnow()
+            )
+
+            embed.add_field(name="💶 Preis", value=f"{price:.2f} €", inline=True)
+            embed.add_field(name="🚚 Gesamt ca.", value=f"{total:.2f} €", inline=True)
+            embed.add_field(name="📏 Größe", value=item.get("size_title", "N/A"), inline=True)
+            embed.add_field(
+                name="⚡ Aktionen",
+                value=f"[🛒 Kaufen](https://www.vinted.de/transaction/buy/new?item_id={item_id})",
+                inline=False
+            )
+
+            photos = item.get("photos", [])
+            if photos:
+                img = photos[0]["url"].replace("/medium/", "/full/")
+                embed.set_image(url=img)
+
+            channel = bot.get_channel(self.channel_id)
+            if channel:
+                await channel.send(embed=embed)
         except Exception as e:
-            print(f"Fehler beim Scannen: {e}")
-        
-        return new_found
+            print(f"Fehler beim Senden des Embeds: {e}")
 
-# Instanz erstellen
-scanner = VintedScanner()
+    async def run(self, bot):
+        self.warmup()
+        print(f"🎯 Scan läuft für Channel {self.channel_id}")
 
-# 4. Der Loop Task (Ersetzt while True)
-@tasks.loop(seconds=15)
-async def scraper_task():
-    channel = bot.get_channel(CHANNEL_ID)
-    if not channel:
-        print(f"❌ Kanal ID {CHANNEL_ID} nicht gefunden!")
+        while True:
+            try:
+                r = self.session.get(self.api_url, headers=self.headers)
+
+                if r.status_code == 200:
+                    data = r.json()
+                    for item in data.get("items", []):
+                        if item["id"] not in self.seen_items:
+                            if self.seen_items: # Verhindert Spam beim ersten Start
+                                await self.send_to_discord(item, bot)
+                                print(f"✅ NEU in {self.channel_id}: {item.get('title')}")
+                            self.seen_items.add(item["id"])
+
+                elif r.status_code == 403:
+                    print(f"⚠️ 403 Forbidden (Channel {self.channel_id}) – Rate Limit? Warte 3 Min.")
+                    await asyncio.sleep(180)
+                
+                elif r.status_code == 429:
+                    print(f"⚠️ 429 Too Many Requests – Warte 5 Min.")
+                    await asyncio.sleep(300)
+
+                await asyncio.sleep(random.uniform(SCAN_MIN, SCAN_MAX))
+
+            except Exception as e:
+                print(f"❌ Fehler im Loop (Channel {self.channel_id}): {e}")
+                await asyncio.sleep(30)
+
+# ==========================================
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+@bot.command(name="startscan")
+async def startscan(ctx, url: str):
+    cid = str(ctx.channel.id)
+
+    if cid in active_snipers:
+        await ctx.send("⚠️ Scan läuft hier bereits.")
         return
 
-    # Achtung: Vinted Abfrage ist synchron, blockiert kurz den Bot. 
-    # Bei 15s Intervall ist das okay.
-    items = scanner.fetch_new_items()
+    channels_data[cid] = {"url": url}
+    with open(CHANNELS_FILE, "w") as f:
+        json.dump(channels_data, f, indent=4)
 
-    if items == "BLOCK":
-        print("Bot pausiert für 2 Minuten wegen Block...")
-        await asyncio.sleep(120)
-        return
+    sniper = VintedSniper(url, cid)
+    active_snipers[cid] = sniper
+    bot.loop.create_task(sniper.run(bot))
 
-    if items:
-        for item in items:
-            print(f"Sende Item: {item.get('title')}")
-            await send_discord_embed(channel, item)
-            await asyncio.sleep(1) # Kleines Delay um Rate Limits zu vermeiden
-
-async def send_discord_embed(channel, item):
-    # Daten vorbereiten
-    p = item.get('total_item_price')
-    price_val = float(p.get('amount')) if isinstance(p, dict) else float(p)
-    total_price = round(price_val + 0.70 + (price_val * 0.05) + 3.99, 2)
-    item_id = item.get('id')
-    item_url = item.get('url') or f"https://www.vinted.de/items/{item_id}"
-    brand = item.get('brand_title') or "Keine Marke"
-    status = scanner.get_clean_status(item)
-    
-    # Bilder
-    photos = item.get('photos', [])
-    if not photos and item.get('photo'): photos = [item.get('photo')]
-    image_urls = [img.get('url', '').replace("/medium/", "/full/") for img in photos if img.get('url')]
-    main_img = image_urls[0] if image_urls else ""
-
-    # Embed bauen (Discord.py Style)
-    embed = discord.Embed(
-        title=f"🔥 {item.get('title')}",
-        url=item_url,
-        color=0x09b1ba,
-        timestamp=discord.utils.utcnow()
-    )
-    embed.add_field(name="💶 Preis", value=f"**{price_val:.2f} €**", inline=True)
-    embed.add_field(name="🚚 Gesamt ca.", value=f"**{total_price:.2f} €**", inline=True)
-    embed.add_field(name="📏 Größe", value=item.get('size_title', 'N/A'), inline=True)
-    embed.add_field(name="🏷️ Marke", value=brand, inline=True)
-    embed.add_field(name="✨ Zustand", value=status, inline=True)
-    embed.add_field(name="⚡ Aktion", value=f"[🛒 Kaufen](https://www.vinted.de/transaction/buy/new?item_id={item_id})", inline=False)
-    
-    if main_img:
-        embed.set_image(url=main_img)
-    embed.set_footer(text="Vinted Bot Token Version")
-
-    try:
-        await channel.send(embed=embed)
-    except Exception as e:
-        print(f"Fehler beim Senden: {e}")
-
-@scraper_task.before_loop
-async def before_scraper():
-    print("Warte bis Bot bereit ist...")
-    await bot.wait_until_ready()
+    await ctx.send("✅ Scan gestartet & permanent gespeichert.")
 
 @bot.event
 async def on_ready():
-    print(f'Eingeloggt als {bot.user} (ID: {bot.user.id})')
-    if not scraper_task.is_running():
-        scraper_task.start()
+    print(f"🤖 Eingeloggt als {bot.user}")
+
+    # Starte alle gespeicherten Scans beim Bot-Start
+    for cid, data in channels_data.items():
+        if cid in active_snipers:
+            continue
+        url = data.get("url")
+        if not url:
+            continue
+
+        print(f"▶️ Re-staring Scan für Channel {cid}")
+        sniper = VintedSniper(url, cid)
+        active_snipers[cid] = sniper
+        bot.loop.create_task(sniper.run(bot))
 
 if __name__ == "__main__":
-    # Webserver Thread starten
-    t = Thread(target=run_web_server)
-    t.start()
-    
-    # Bot starten
-    if DISCORD_TOKEN:
-        bot.run(DISCORD_TOKEN)
+    if not DISCORD_TOKEN:
+        print("❌ ERROR: Kein DISCORD_TOKEN gefunden! Bitte in Railway Variables setzen.")
     else:
-        print("❌ FEHLER: Kein DISCORD_TOKEN gefunden!")
+        bot.run(DISCORD_TOKEN)
