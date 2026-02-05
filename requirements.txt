@@ -1,4 +1,3 @@
-tls_client
-flask
-gunicorn
 discord.py
+tls_client
+python-dotenv
